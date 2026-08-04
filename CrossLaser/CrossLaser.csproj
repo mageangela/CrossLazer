@@ -9,10 +9,14 @@
     <ApplicationManifest>app.manifest</ApplicationManifest>
     <ApplicationIcon>laser-sparks_38246.ico</ApplicationIcon>
     <Authors>MageAngela</Authors>
+    <Version>1.1</Version>
+    <AssemblyVersion>1.1</AssemblyVersion>
+    <FileVersion>1.1</FileVersion>
   </PropertyGroup>
 
   <ItemGroup>
     <None Remove="Resources\WinDivert.dll" />
+    <None Remove="Resources\WinDivert64.sys" />
   </ItemGroup>
 
   <ItemGroup>
@@ -21,6 +25,7 @@
 
   <ItemGroup>
     <EmbeddedResource Include="Resources\WinDivert.dll" />
+    <EmbeddedResource Include="Resources\WinDivert64.sys" />
   </ItemGroup>
 
   <ItemGroup>

@@ -4,12 +4,13 @@ using System.Reflection;
 using System.Runtime.InteropServices;
 using System.Threading;
 using System.Windows.Forms;
+using Microsoft.Win32;
 
 namespace CrossLaser
 {
     public partial class Form1 : Form
     {
-        // 直接 P/Invoke WinDivert API
+        // WinDivert API
         [DllImport("WinDivert.dll", CallingConvention = CallingConvention.Cdecl)]
         private static extern IntPtr WinDivertOpen(string filter, int layer, int priority, ulong flags);
 
@@ -22,7 +23,6 @@ namespace CrossLaser
         [DllImport("WinDivert.dll", CallingConvention = CallingConvention.Cdecl)]
         private static extern bool WinDivertClose(IntPtr handle);
 
-        // 添加 LoadLibrary 和 FreeLibrary 用于手动控制 DLL 加载/卸载
         [DllImport("kernel32.dll", SetLastError = true)]
         private static extern IntPtr LoadLibrary(string lpFileName);
 
@@ -30,26 +30,71 @@ namespace CrossLaser
         [return: MarshalAs(UnmanagedType.Bool)]
         private static extern bool FreeLibrary(IntPtr hModule);
 
-        [DllImport("kernel32.dll", SetLastError = true)]
-        private static extern IntPtr GetModuleHandle(string lpModuleName);
+        // 用于驱动管理
+        [DllImport("advapi32.dll", SetLastError = true, CharSet = CharSet.Auto)]
+        private static extern IntPtr OpenSCManager(string lpMachineName, string lpDatabaseName, int dwDesiredAccess);
+
+        [DllImport("advapi32.dll", SetLastError = true, CharSet = CharSet.Auto)]
+        private static extern IntPtr CreateService(IntPtr hSCManager, string lpServiceName, string lpDisplayName,
+            int dwDesiredAccess, int dwServiceType, int dwStartType, int dwErrorControl,
+            string lpBinaryPathName, string lpLoadOrderGroup, IntPtr lpdwTagId,
+            string lpDependencies, string lpServiceStartName, string lpPassword);
+
+        [DllImport("advapi32.dll", SetLastError = true, CharSet = CharSet.Auto)]
+        private static extern IntPtr OpenService(IntPtr hSCManager, string lpServiceName, int dwDesiredAccess);
+
+        [DllImport("advapi32.dll", SetLastError = true)]
+        private static extern bool StartService(IntPtr hService, int dwNumServiceArgs, string[] lpServiceArgVectors);
+
+        [DllImport("advapi32.dll", SetLastError = true)]
+        private static extern bool CloseServiceHandle(IntPtr hSCObject);
+
+        [DllImport("advapi32.dll", SetLastError = true)]
+        private static extern bool DeleteService(IntPtr hService);
+
+        [DllImport("advapi32.dll", SetLastError = true)]
+        private static extern bool ControlService(IntPtr hService, int dwControl, ref ServiceStatus lpServiceStatus);
+
+        [StructLayout(LayoutKind.Sequential)]
+        private struct ServiceStatus
+        {
+            public int dwServiceType;
+            public int dwCurrentState;
+            public int dwControlsAccepted;
+            public int dwWin32ExitCode;
+            public int dwServiceSpecificExitCode;
+            public int dwCheckPoint;
+            public int dwWaitHint;
+        }
+
+        // 服务相关常量
+        private const int SC_MANAGER_ALL_ACCESS = 0xF003F;
+        private const int SERVICE_ALL_ACCESS = 0xF01FF;
+        private const int SERVICE_WIN32_OWN_PROCESS = 0x00000010;
+        private const int SERVICE_DEMAND_START = 0x00000003;
+        private const int SERVICE_ERROR_NORMAL = 0x00000001;
+        private const int SERVICE_CONTROL_STOP = 0x00000001;
+        private const int SERVICE_RUNNING = 0x00000004;
+
+        private const string WIN_DIVERT_SERVICE_NAME = "WinDivert1.4";
 
         private Thread? _workerThread;
         private CancellationTokenSource? _cancellationTokenSource;
         private IntPtr _divertHandle = IntPtr.Zero;
-        private IntPtr _dllHandle = IntPtr.Zero;  // 记录 DLL 句柄
+        private IntPtr _dllHandle = IntPtr.Zero;
 
         private long _droppedCount = 0;
         private System.Windows.Forms.Timer? _updateTimer;
         private long _displayCount = 0;
 
         private string _dllPath = string.Empty;
+        private string _sysPath = string.Empty;
         private bool _isDllLoaded = false;
 
         public Form1()
         {
             InitializeComponent();
 
-            // 设置窗口为固定大小
             this.FormBorderStyle = FormBorderStyle.FixedSingle;
             this.MaximizeBox = false;
             this.StartPosition = FormStartPosition.CenterScreen;
@@ -58,28 +103,75 @@ namespace CrossLaser
             _updateTimer.Interval = 1000;
             _updateTimer.Tick += UpdateTimer_Tick;
 
-            ExtractDllToAppDirectory();
+            // 先提取所有文件
+            ExtractAllFiles();
         }
 
-        private void ExtractDllToAppDirectory()
+        /// <summary>
+        /// 提取所有需要的文件（DLL 和 SYS）
+        /// </summary>
+        private void ExtractAllFiles()
         {
             try
             {
                 string appDirectory = AppDomain.CurrentDomain.BaseDirectory;
                 _dllPath = Path.Combine(appDirectory, "WinDivert.dll");
+                _sysPath = Path.Combine(appDirectory, "WinDivert64.sys");
 
-                if (File.Exists(_dllPath))
+                // 提取 DLL
+                ExtractResource("WinDivert.dll", _dllPath);
+                // 提取 SYS
+                ExtractResource("WinDivert64.sys", _sysPath);
+
+                UpdateStatus("文件已释放，准备就绪");
+            }
+            catch (Exception ex)
+            {
+                MessageBox.Show($"释放文件失败: {ex.Message}", "错误",
+                    MessageBoxButtons.OK, MessageBoxIcon.Error);
+            }
+        }
+
+        /// <summary>
+        /// 提取资源文件到目标路径（如果文件已存在则跳过）
+        /// </summary>
+        private void ExtractResource(string fileName, string targetPath)
+        {
+            try
+            {
+                // 检查文件是否已存在
+                if (File.Exists(targetPath))
                 {
-                    File.Delete(_dllPath);
+                    // 文件已存在，验证文件是否完整（检查大小是否大于0）
+                    FileInfo fileInfo = new FileInfo(targetPath);
+                    if (fileInfo.Length > 0)
+                    {
+                        // 文件存在且有效，跳过释放
+                        return;
+                    }
+                    else
+                    {
+                        // 文件存在但为空，删除后重新释放
+                        try
+                        {
+                            File.Delete(targetPath);
+                        }
+                        catch
+                        {
+                            // 如果删除失败，说明文件被占用，跳过
+                            return;
+                        }
+                    }
                 }
 
+                // 如果文件不存在或已被删除，从资源中释放
                 Assembly assembly = Assembly.GetExecutingAssembly();
                 string[] resourceNames = assembly.GetManifestResourceNames();
                 string? resourceName = null;
 
                 foreach (string name in resourceNames)
                 {
-                    if (name.Contains("WinDivert.dll") || name.EndsWith("WinDivert.dll"))
+                    if (name.Contains(fileName) || name.EndsWith(fileName))
                     {
                         resourceName = name;
                         break;
@@ -88,35 +180,206 @@ namespace CrossLaser
 
                 if (string.IsNullOrEmpty(resourceName))
                 {
-                    MessageBox.Show("未找到 WinDivert.dll 资源！", "错误",
-                        MessageBoxButtons.OK, MessageBoxIcon.Error);
-                    return;
+                    throw new Exception($"未找到资源: {fileName}");
                 }
 
                 using (Stream? stream = assembly.GetManifestResourceStream(resourceName))
                 {
                     if (stream == null)
                     {
-                        MessageBox.Show("无法读取嵌入的 WinDivert.dll！", "错误",
-                            MessageBoxButtons.OK, MessageBoxIcon.Error);
-                        return;
+                        throw new Exception($"无法读取资源: {resourceName}");
                     }
 
-                    using (FileStream fileStream = File.Create(_dllPath))
+                    using (FileStream fileStream = File.Create(targetPath))
                     {
                         stream.CopyTo(fileStream);
                     }
                 }
+            }
+            catch (Exception ex)
+            {
+                throw new Exception($"提取 {fileName} 失败: {ex.Message}");
+            }
+        }
 
-                if (File.Exists(_dllPath))
+        /// <summary>
+        /// 安装并启动 WinDivert 驱动
+        /// </summary>
+        private bool InstallAndStartDriver()
+        {
+            try
+            {
+                // 1. 检查驱动是否已经安装并运行
+                if (IsDriverRunning())
                 {
-                    // 不自动加载 DLL，等点击"开始"时再加载
+                    UpdateStatus("WinDivert 驱动已运行");
+                    return true;
+                }
+
+                UpdateStatus("正在安装 WinDivert 驱动...");
+
+                // 2. 将 SYS 文件复制到系统目录
+                string systemDriverPath = Path.Combine(Environment.SystemDirectory, "drivers", "WinDivert64.sys");
+
+                // 如果系统目录已有驱动，先删除
+                if (File.Exists(systemDriverPath))
+                {
+                    try
+                    {
+                        File.Delete(systemDriverPath);
+                    }
+                    catch
+                    {
+                        // 可能正在使用，尝试使用当前目录的驱动
+                        systemDriverPath = _sysPath;
+                    }
+                }
+                else
+                {
+                    // 复制驱动到系统目录
+                    File.Copy(_sysPath, systemDriverPath, true);
+                }
+
+                // 3. 创建并启动服务
+                IntPtr scManager = OpenSCManager(null, null, SC_MANAGER_ALL_ACCESS);
+                if (scManager == IntPtr.Zero)
+                {
+                    throw new Exception("无法打开服务管理器");
+                }
+
+                try
+                {
+                    // 检查服务是否已存在
+                    IntPtr service = OpenService(scManager, WIN_DIVERT_SERVICE_NAME, SERVICE_ALL_ACCESS);
+
+                    if (service != IntPtr.Zero)
+                    {
+                        // 服务已存在，尝试启动
+                        CloseServiceHandle(service);
+
+                        // 尝试启动服务
+                        service = OpenService(scManager, WIN_DIVERT_SERVICE_NAME, SERVICE_ALL_ACCESS);
+                        if (service != IntPtr.Zero)
+                        {
+                            ServiceStatus status = new ServiceStatus();
+                            if (StartService(service, 0, null))
+                            {
+                                CloseServiceHandle(service);
+                                CloseServiceHandle(scManager);
+                                UpdateStatus("WinDivert 驱动已启动");
+                                return true;
+                            }
+                            CloseServiceHandle(service);
+                        }
+
+                        // 如果启动失败，删除旧服务重新创建
+                        service = OpenService(scManager, WIN_DIVERT_SERVICE_NAME, SERVICE_ALL_ACCESS);
+                        if (service != IntPtr.Zero)
+                        {
+                            DeleteService(service);
+                            CloseServiceHandle(service);
+                        }
+                    }
+
+                    // 创建新服务
+                    service = CreateService(
+                        scManager,
+                        WIN_DIVERT_SERVICE_NAME,
+                        "WinDivert Service",
+                        SERVICE_ALL_ACCESS,
+                        SERVICE_WIN32_OWN_PROCESS,
+                        SERVICE_DEMAND_START,
+                        SERVICE_ERROR_NORMAL,
+                        systemDriverPath,
+                        null,
+                        IntPtr.Zero,
+                        null,
+                        null,
+                        null
+                    );
+
+                    if (service == IntPtr.Zero)
+                    {
+                        throw new Exception($"创建服务失败，错误代码: {Marshal.GetLastWin32Error()}");
+                    }
+
+                    // 启动服务 - 使用不同的变量名避免冲突
+                    ServiceStatus serviceStatus = new ServiceStatus();
+                    if (!StartService(service, 0, null))
+                    {
+                        int error = Marshal.GetLastWin32Error();
+                        if (error != 1056) // 1056 = 服务已在运行
+                        {
+                            throw new Exception($"启动服务失败，错误代码: {error}");
+                        }
+                    }
+
+                    CloseServiceHandle(service);
+                    CloseServiceHandle(scManager);
+
+                    UpdateStatus("WinDivert 驱动安装并启动成功");
+                    return true;
+                }
+                finally
+                {
+                    CloseServiceHandle(scManager);
                 }
             }
             catch (Exception ex)
             {
-                MessageBox.Show($"释放 WinDivert.dll 失败: {ex.Message}", "错误",
-                    MessageBoxButtons.OK, MessageBoxIcon.Error);
+                UpdateStatus($"驱动安装失败: {ex.Message}");
+                return false;
+            }
+        }
+
+        /// <summary>
+        /// 检查 WinDivert 驱动是否正在运行
+        /// </summary>
+        private bool IsDriverRunning()
+        {
+            try
+            {
+                // 尝试打开一个临时句柄来测试驱动是否可用
+                IntPtr testHandle = WinDivertOpen("false", 0, 0, 0);
+                if (testHandle != IntPtr.Zero)
+                {
+                    WinDivertClose(testHandle);
+                    return true;
+                }
+
+                // 如果打开失败，检查服务状态
+                IntPtr scManager = OpenSCManager(null, null, SC_MANAGER_ALL_ACCESS);
+                if (scManager == IntPtr.Zero)
+                {
+                    return false;
+                }
+
+                try
+                {
+                    IntPtr service = OpenService(scManager, WIN_DIVERT_SERVICE_NAME, SERVICE_ALL_ACCESS);
+                    if (service == IntPtr.Zero)
+                    {
+                        return false;
+                    }
+
+                    ServiceStatus status = new ServiceStatus();
+                    if (ControlService(service, SERVICE_CONTROL_STOP, ref status))
+                    {
+                        CloseServiceHandle(service);
+                        return status.dwCurrentState == SERVICE_RUNNING;
+                    }
+
+                    CloseServiceHandle(service);
+                    return false;
+                }
+                finally
+                {
+                    CloseServiceHandle(scManager);
+                }
+            }
+            catch
+            {
+                return false;
             }
         }
 
@@ -141,17 +404,33 @@ namespace CrossLaser
 
             if (_workerThread == null || !_workerThread.IsAlive)
             {
+                // 在启动前，确保驱动已安装并运行
+                if (!IsDriverRunning())
+                {
+                    if (!InstallAndStartDriver())
+                    {
+                        MessageBox.Show("无法安装或启动 WinDivert 驱动！\n请确保以管理员身份运行。",
+                            "错误", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                        return;
+                    }
+
+                    // 等待驱动初始化
+                    Thread.Sleep(500);
+                }
+
                 StartDropping();
                 btnToggle.Text = "恢复网络";
-                btnToggle.BackColor = System.Drawing.Color.LightGreen;
+                btnToggle.BackColor = System.Drawing.Color.DarkRed;
+                btnToggle.ForeColor = System.Drawing.Color.White;
                 _updateTimer.Start();
-                UpdateStatus("正在拦截并丢弃所有外发数据包...");
+                UpdateStatus("正在拦截但还未监测到数据包...");
             }
             else
             {
                 StopDropping();
                 btnToggle.Text = "阻止联网";
-                btnToggle.BackColor = System.Drawing.SystemColors.Control;
+                btnToggle.BackColor = System.Drawing.Color.WhiteSmoke;
+                btnToggle.ForeColor = System.Drawing.Color.DarkRed;
                 _updateTimer.Stop();
                 UpdateStatus($"已停止，共丢弃 {_displayCount:N0} 个数据包。");
             }
@@ -162,7 +441,6 @@ namespace CrossLaser
             Interlocked.Exchange(ref _droppedCount, 0);
             _displayCount = 0;
 
-            // 加载 DLL（如果尚未加载）
             if (!_isDllLoaded)
             {
                 LoadDll();
@@ -174,9 +452,6 @@ namespace CrossLaser
             _workerThread.Start();
         }
 
-        /// <summary>
-        /// 加载 WinDivert.dll
-        /// </summary>
         private void LoadDll()
         {
             try
@@ -189,7 +464,6 @@ namespace CrossLaser
                         throw new Exception($"加载 DLL 失败，错误代码: {Marshal.GetLastWin32Error()}");
                     }
                     _isDllLoaded = true;
-                    Console.WriteLine("WinDivert.dll 已加载");
                 }
             }
             catch (Exception ex)
@@ -199,66 +473,42 @@ namespace CrossLaser
             }
         }
 
-        /// <summary>
-        /// 卸载 WinDivert.dll
-        /// </summary>
         private void UnloadDll()
         {
             try
             {
                 if (_dllHandle != IntPtr.Zero)
                 {
-                    bool result = FreeLibrary(_dllHandle);
-                    if (result)
-                    {
-                        _dllHandle = IntPtr.Zero;
-                        _isDllLoaded = false;
-                        Console.WriteLine("WinDivert.dll 已卸载");
-                    }
-                    else
-                    {
-                        Console.WriteLine($"卸载 DLL 失败，错误代码: {Marshal.GetLastWin32Error()}");
-                    }
+                    FreeLibrary(_dllHandle);
+                    _dllHandle = IntPtr.Zero;
+                    _isDllLoaded = false;
                 }
             }
-            catch (Exception ex)
-            {
-                Console.WriteLine($"卸载 DLL 异常: {ex.Message}");
-            }
+            catch { }
         }
 
         private void StopDropping()
         {
             try
             {
-                // 1. 取消线程
                 _cancellationTokenSource?.Cancel();
 
-                // 2. 等待线程结束
                 if (_workerThread != null)
                 {
-                    _workerThread.Join(2000); // 等待最多2秒
+                    _workerThread.Join(2000);
                     _workerThread = null;
                 }
 
-                // 3. 关闭 WinDivert 句柄
                 if (_divertHandle != IntPtr.Zero)
                 {
                     WinDivertClose(_divertHandle);
                     _divertHandle = IntPtr.Zero;
-                    Console.WriteLine("WinDivert 句柄已关闭");
                 }
 
-                // 4. 给系统一点时间释放资源
                 Thread.Sleep(100);
-
-                // 5. 卸载 DLL
                 UnloadDll();
             }
-            catch (Exception ex)
-            {
-                Console.WriteLine($"停止丢包时出错: {ex.Message}");
-            }
+            catch { }
         }
 
         private void DropPacketsLoop(CancellationToken ct)
@@ -270,8 +520,24 @@ namespace CrossLaser
                 if (_divertHandle == IntPtr.Zero)
                 {
                     int errorCode = Marshal.GetLastWin32Error();
-                    UpdateStatus($"无法打开 WinDivert，错误代码: {errorCode}，请以管理员身份运行！");
-                    return;
+                    UpdateStatus($"无法打开 WinDivert，错误代码: {errorCode}");
+
+                    // 尝试重新安装驱动
+                    if (InstallAndStartDriver())
+                    {
+                        Thread.Sleep(500);
+                        _divertHandle = WinDivertOpen("outbound", 0, 0, 0);
+
+                        if (_divertHandle == IntPtr.Zero)
+                        {
+                            UpdateStatus($"重新安装后仍无法打开，错误代码: {Marshal.GetLastWin32Error()}");
+                            return;
+                        }
+                    }
+                    else
+                    {
+                        return;
+                    }
                 }
 
                 byte[] packetBuffer = new byte[65535];
@@ -295,12 +561,10 @@ namespace CrossLaser
                     }
                 }
 
-                // 循环结束，关闭句柄
                 if (_divertHandle != IntPtr.Zero)
                 {
                     WinDivertClose(_divertHandle);
                     _divertHandle = IntPtr.Zero;
-                    Console.WriteLine("WinDivert 句柄已关闭（循环结束）");
                 }
             }
             catch (Exception ex)
@@ -321,54 +585,33 @@ namespace CrossLaser
             }
         }
 
-        /// <summary>
-        /// 强制清理，确保 DLL 被删除
-        /// </summary>
         private void ForceCleanup()
         {
             try
             {
-                // 1. 停止丢包
                 StopDropping();
 
-                // 2. 强制垃圾回收，确保所有资源被释放
                 GC.Collect();
                 GC.WaitForPendingFinalizers();
                 GC.Collect();
 
-                // 3. 等待系统释放文件句柄
                 Thread.Sleep(500);
 
-                // 4. 删除 DLL 文件
-                if (!string.IsNullOrEmpty(_dllPath) && File.Exists(_dllPath))
+                // 删除释放的文件
+                foreach (string file in new[] { _dllPath, _sysPath })
                 {
-                    // 尝试重置文件属性
-                    File.SetAttributes(_dllPath, FileAttributes.Normal);
-
-                    // 尝试删除
-                    File.Delete(_dllPath);
-                    Console.WriteLine($"WinDivert.dll 已删除");
-                }
-            }
-            catch (Exception ex)
-            {
-                Console.WriteLine($"删除 DLL 失败: {ex.Message}");
-
-                // 如果删除失败，使用 cmd 延迟删除
-                try
-                {
-                    string cmd = $"cmd.exe /c del /f /q \"{_dllPath}\"";
-                    System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo
+                    if (!string.IsNullOrEmpty(file) && File.Exists(file))
                     {
-                        FileName = "cmd.exe",
-                        Arguments = $"/c choice /C Y /N /D Y /T 1 & del /f /q \"{_dllPath}\"",
-                        WindowStyle = System.Diagnostics.ProcessWindowStyle.Hidden,
-                        CreateNoWindow = true
-                    });
-                    Console.WriteLine("已启动延迟删除任务");
+                        try
+                        {
+                            File.SetAttributes(file, FileAttributes.Normal);
+                            File.Delete(file);
+                        }
+                        catch { }
+                    }
                 }
-                catch { }
             }
+            catch { }
         }
 
         protected override void OnFormClosing(FormClosingEventArgs e)
