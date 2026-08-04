@@ -7,11 +7,13 @@
     <UseWindowsForms>true</UseWindowsForms>
     <ImplicitUsings>enable</ImplicitUsings>
     <ApplicationManifest>app.manifest</ApplicationManifest>
-    <ApplicationIcon>laser-sparks_38246.ico</ApplicationIcon>
+    <ApplicationIcon>crosslaser.ico</ApplicationIcon>
     <Authors>MageAngela</Authors>
-    <Version>1.1</Version>
-    <AssemblyVersion>1.1</AssemblyVersion>
-    <FileVersion>1.1</FileVersion>
+    <Version>1.2</Version>
+    <Copyright>MageAngela.cn</Copyright>
+    <PackageIcon>crosslaser.png</PackageIcon>
+    <AssemblyVersion>1.2</AssemblyVersion>
+    <FileVersion>1.2</FileVersion>
   </PropertyGroup>
 
   <ItemGroup>
@@ -20,7 +22,7 @@
   </ItemGroup>
 
   <ItemGroup>
-    <Content Include="laser-sparks_38246.ico" />
+    <Content Include="crosslaser.ico" />
   </ItemGroup>
 
   <ItemGroup>
@@ -41,6 +43,13 @@
       <Generator>ResXFileCodeGenerator</Generator>
       <LastGenOutput>Resources.Designer.cs</LastGenOutput>
     </EmbeddedResource>
+  </ItemGroup>
+
+  <ItemGroup>
+    <None Update="crosslaser.png">
+      <Pack>True</Pack>
+      <PackagePath>\</PackagePath>
+    </None>
   </ItemGroup>
 
 </Project>

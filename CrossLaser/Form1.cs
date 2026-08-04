@@ -75,6 +75,7 @@ namespace CrossLaser
         private const int SERVICE_ERROR_NORMAL = 0x00000001;
         private const int SERVICE_CONTROL_STOP = 0x00000001;
         private const int SERVICE_RUNNING = 0x00000004;
+        private bool _isTcpOnlyMode = false;
 
         private const string WIN_DIVERT_SERVICE_NAME = "WinDivert1.4";
 
@@ -389,7 +390,7 @@ namespace CrossLaser
             if (currentCount != _displayCount)
             {
                 _displayCount = currentCount;
-                UpdateStatus($"已丢弃数据包: {_displayCount:N0}");
+                UpdateStatus($"丢弃数据包状态: {_displayCount:N0}");
             }
         }
 
@@ -404,6 +405,12 @@ namespace CrossLaser
 
             if (_workerThread == null || !_workerThread.IsAlive)
             {
+                // 读取复选框状态 - 在启动前读取
+                _isTcpOnlyMode = chkOnlyTCP.Checked;
+
+                // 禁用复选框（运行时不允许更改模式）
+                chkOnlyTCP.Enabled = false;
+
                 // 在启动前，确保驱动已安装并运行
                 if (!IsDriverRunning())
                 {
@@ -423,7 +430,7 @@ namespace CrossLaser
                 btnToggle.BackColor = System.Drawing.Color.DarkRed;
                 btnToggle.ForeColor = System.Drawing.Color.White;
                 _updateTimer.Start();
-                UpdateStatus("正在拦截但还未监测到数据包...");
+                UpdateStatus("等待数据包到达...");
             }
             else
             {
@@ -432,7 +439,7 @@ namespace CrossLaser
                 btnToggle.BackColor = System.Drawing.Color.WhiteSmoke;
                 btnToggle.ForeColor = System.Drawing.Color.DarkRed;
                 _updateTimer.Stop();
-                UpdateStatus($"已停止，共丢弃 {_displayCount:N0} 个数据包。");
+                UpdateStatus($"已停止，丢弃数据包状态 {_displayCount:N0} 。");
             }
         }
 
@@ -507,6 +514,16 @@ namespace CrossLaser
 
                 Thread.Sleep(100);
                 UnloadDll();
+
+                // 确保复选框被启用（防止异常退出后复选框仍被禁用）
+                if (chkOnlyTCP.InvokeRequired)
+                {
+                    chkOnlyTCP.Invoke(new Action(() => chkOnlyTCP.Enabled = true));
+                }
+                else
+                {
+                    chkOnlyTCP.Enabled = true;
+                }
             }
             catch { }
         }
@@ -515,18 +532,30 @@ namespace CrossLaser
         {
             try
             {
-                _divertHandle = WinDivertOpen("outbound", 0, 0, 0);
+                // 根据模式构建过滤器
+                string filter;
+                if (_isTcpOnlyMode)
+                {
+                    // 仅TCP模式：只捕获TCP数据包
+                    filter = "tcp";
+                }
+                else
+                {
+                    // 全部模式：捕获所有出站数据包
+                    filter = "outbound";
+                }
+
+                _divertHandle = WinDivertOpen(filter, 0, 0, 0);
 
                 if (_divertHandle == IntPtr.Zero)
                 {
                     int errorCode = Marshal.GetLastWin32Error();
                     UpdateStatus($"无法打开 WinDivert，错误代码: {errorCode}");
 
-                    // 尝试重新安装驱动
                     if (InstallAndStartDriver())
                     {
                         Thread.Sleep(500);
-                        _divertHandle = WinDivertOpen("outbound", 0, 0, 0);
+                        _divertHandle = WinDivertOpen(filter, 0, 0, 0);
 
                         if (_divertHandle == IntPtr.Zero)
                         {
