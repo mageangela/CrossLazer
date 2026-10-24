@@ -9,14 +9,15 @@
     <ApplicationManifest>app.manifest</ApplicationManifest>
     <ApplicationIcon>crosslaser.ico</ApplicationIcon>
     <Authors>MageAngela</Authors>
-    <Version>1.2</Version>
+    <Version>1.3</Version>
     <Copyright>MageAngela.cn</Copyright>
     <PackageIcon>crosslaser.png</PackageIcon>
-    <AssemblyVersion>1.2</AssemblyVersion>
-    <FileVersion>1.2</FileVersion>
+    <FileVersion>1.3</FileVersion>
   </PropertyGroup>
 
   <ItemGroup>
+    <None Remove="Resources\off.wav" />
+    <None Remove="Resources\on.wav" />
     <None Remove="Resources\WinDivert.dll" />
     <None Remove="Resources\WinDivert64.sys" />
   </ItemGroup>
@@ -26,6 +27,8 @@
   </ItemGroup>
 
   <ItemGroup>
+    <EmbeddedResource Include="Resources\off.wav" />
+    <EmbeddedResource Include="Resources\on.wav" />
     <EmbeddedResource Include="Resources\WinDivert.dll" />
     <EmbeddedResource Include="Resources\WinDivert64.sys" />
   </ItemGroup>
